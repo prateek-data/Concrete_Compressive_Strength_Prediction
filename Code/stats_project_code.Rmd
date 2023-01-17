@@ -1,0 +1,1027 @@
+---
+title: "Statistical Modeling Project"
+author: "Prateek Sethi"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# STATISTICAL MODELLING PROJECT
+
+## Regression Analysis on the Concrete Compressive Strength Dataset 
+
+#### Load required packages
+```{r}
+library("readxl")
+library(faraway)
+library(ggplot2)
+library(reshape2)
+library(lmtest) 
+library(dplyr)
+library(ggplot2)
+library(randomForest)
+library(MASS)
+```
+
+
+#### Load dataset
+```{r}
+data <- read_excel("Concrete_Data.xls")
+```
+
+
+#### Change column names
+```{r}
+#changing column names to make them shorter
+colnames(data)[colnames(data) == "Cement (component 1)(kg in a m^3 mixture)"] ="cement"
+colnames(data)[colnames(data) == "Blast Furnace Slag (component 2)(kg in a m^3 mixture)"] ="blast_furnace_slag"
+colnames(data)[colnames(data) == "Fly Ash (component 3)(kg in a m^3 mixture)"] ="fly_ash"
+colnames(data)[colnames(data) == "Superplasticizer (component 5)(kg in a m^3 mixture)"] ="superplasticizer"
+colnames(data)[colnames(data) == "Water  (component 4)(kg in a m^3 mixture)"] ="water"
+colnames(data)[colnames(data) == "Coarse Aggregate  (component 6)(kg in a m^3 mixture)"] ="coarse_agg"
+colnames(data)[colnames(data) == "Fine Aggregate (component 7)(kg in a m^3 mixture)"] ="fine_agg"
+colnames(data)[colnames(data) == "Age (day)"] ="age"
+colnames(data)[colnames(data) == "Concrete compressive strength(MPa, megapascals)"] ="concrete_strength"
+
+```
+
+
+### Univariate Analysis
+
+#### Data Description
+```{r}
+#column names
+names(data)
+
+#data size
+dim(data)  
+
+#variable description
+str(data)
+
+#top 5 rows
+head(data)
+
+#data summary
+summary(data)
+```
+
+
+#### Data Distribution
+```{r}
+par(mfrow=c(3,3))
+hist(data$cement)
+hist(data$blast_furnace_slag)
+hist(data$fly_ash)
+hist(data$water)
+hist(data$superplasticizer)
+hist(data$coarse_agg)
+hist(data$fine_agg)
+hist(data$age)
+hist(data$concrete_strength)
+```
+
+
+### Multivariate Analysis
+
+#### Correlation Matrix
+```{r fig2, fig.height = 30, fig.width = 30}
+pairs(data)
+```
+
+
+#### Correlation Heatmap
+```{r}
+corr_mat <- round(cor(data),2)
+melted_corr_mat <- melt(corr_mat)
+ggplot(data = melted_corr_mat, aes(x=Var1, y=Var2,
+                                   fill=value), size = 10) +
+  geom_tile() +
+  geom_text(aes(Var2, Var1, label = value),
+            color = "white", size = 3)
+```
+
+
+#### Split train test set
+```{r}
+seed = 21
+
+##train test split
+set.seed(seed)
+dt = sort(sample(nrow(data), nrow(data)*.80))
+train<-data[dt,]
+test<-data[-dt,]
+```
+
+
+#### Baseline Model
+```{r}
+baseline = lm(concrete_strength~.,data=train)
+```
+
+
+
+#### Variance Inflation Factor
+```{r}
+vif(baseline)
+```
+
+
+#### Outliers
+```{r}
+nrow(data[which(abs(rstandard(baseline)) > 2) , ])
+```
+
+
+#### Influential Points
+```{r}
+indices = cooks.distance(baseline) > 4 / length(cooks.distance(baseline))
+nrow(data[which(indices) , ]) 
+```
+
+
+#### Test Model Assumptions
+```{r}
+plot_residuals <- function(model) {
+  plot(fitted(model), resid(model), col = "grey", pch = 20,
+       xlab = "Fitted", ylab = "Residuals", main = "Resid plot")
+  abline(h = 0, col = "darkorange", lwd = 2)
+}
+
+plot_qq <- function(model) {
+  qqnorm(resid(model))
+  qqline(resid(model), col = "dodgerblue", lwd = 2)
+}
+
+check_model_assumptions <- function(model) {
+  #check by graphs
+  plot_residuals(model)
+  #invisible(readline(prompt="Press [enter] to continue"))
+  plot_qq(model)
+  
+  #bptest for equal variance
+  print(bptest(model))
+  
+  #shapiro wilk test for normality
+  print(shapiro.test(resid(model)))
+}
+
+check_model_assumptions(baseline)
+```
+
+### Applying Response Transformation to satisfy model assumptions
+
+#### Using BoxCox graph
+```{r}
+par(mfrow=c(1,1))
+boxcox(concrete_strength~.,data=train)
+```
+lambda  =  0.8
+
+#### Transform response variable and check model assumptions
+```{r}
+lambda  =  0.8
+transformed_model = lm(((concrete_strength^lambda)-1)/lambda ~., data=train)
+summary(transformed_model)
+
+check_model_assumptions(transformed_model)
+```
+The model assumptions still fail for linearity, normality and equal variance. 
+
+## Prediction Performance
+
+### Variable Addition [Increasing model complexity]
+
+We will now start adding non linear predictor variables in order to capture any nonlinearity that's present in the data.
+
+#### Fit a simple model with all predictors and calculate MSE and PRESS score
+```{r}
+mlr <- lm(concrete_strength~.,data=train)
+summary(mlr)
+
+
+n = nrow(train)
+press_mlr = sqrt(sum((resid(mlr)/(1-hatvalues(mlr)))^2)/n)
+press_mlr
+
+
+calculate_mse_test <- function(model, test) {
+  ypred = predict(model, newdata = test)
+  resid = ypred - test$concrete_strength
+  mse = mean(resid^2)
+  return(mse)
+}
+
+mse_mlr = calculate_mse_test(mlr, test)
+mse_mlr
+```
+
+
+#### Add squared polynomial terms and calculate MSE and PRESS score
+```{r}
+mlr_squared <- lm(concrete_strength ~ cement + blast_furnace_slag + 
+                    fly_ash + water + superplasticizer + coarse_agg + 
+                    fine_agg + age + I(cement^2) + I(blast_furnace_slag^2) + 
+                    I(fly_ash^2) + I(water^2) + I(superplasticizer^2) + 
+                    I(coarse_agg^2) + 
+                    I(fine_agg^2) + I(age^2), data = train)
+summary(mlr_squared)
+
+press_sq = sqrt(sum((resid(mlr_squared)/(1-hatvalues(mlr_squared)))^2)/n)
+press_sq
+
+mse_sq = calculate_mse_test(mlr_squared, test)
+mse_sq
+```
+
+
+#### Add cubic polynomial terms and calculate MSE and PRESS score
+```{r}
+mlr_cubed <- lm(concrete_strength ~ cement + blast_furnace_slag + 
+                  fly_ash + water + superplasticizer + coarse_agg + 
+                  fine_agg + age + I(cement^2) + I(blast_furnace_slag^2) + 
+                  I(fly_ash^2) + I(water^2) + I(superplasticizer^2) + 
+                  I(coarse_agg^2) + 
+                  I(fine_agg^2) + I(age^2) + I(cement^3) + 
+                  I(blast_furnace_slag^3) + 
+                  I(fly_ash^3) + I(water^3) + I(superplasticizer^3) + 
+                  I(coarse_agg^3) + 
+                  I(fine_agg^3) + I(age^3), data = train)
+summary(mlr_cubed)
+
+press_cub = sqrt(sum((resid(mlr_cubed)/(1-hatvalues(mlr_cubed)))^2)/n)
+press_cub
+
+mse_cub = calculate_mse_test(mlr_cubed, test)
+mse_cub
+```
+
+
+#### Add square root terms and calculate MSE and PRESS score
+```{r}
+mlr_sqrt <- lm(concrete_strength ~ cement + blast_furnace_slag + 
+                 fly_ash + water + superplasticizer + coarse_agg + 
+                 fine_agg + age + I(cement^2) + I(blast_furnace_slag^2) + 
+                 I(fly_ash^2) + I(water^2) + I(superplasticizer^2) + 
+                 I(coarse_agg^2) + 
+                 I(fine_agg^2) + I(age^2) + I(cement^3) + 
+                 I(blast_furnace_slag^3) + 
+                 I(fly_ash^3) + I(water^3) + I(superplasticizer^3) + 
+                 I(coarse_agg^3) + 
+                 I(fine_agg^3) + I(age^3) + I(sqrt(cement)) + 
+                 I(sqrt(blast_furnace_slag)) + 
+                 I(sqrt(fly_ash)) + I(sqrt(water)) + 
+                 I(sqrt(superplasticizer)) + I(sqrt(coarse_agg)) + 
+                 I(sqrt(fine_agg)) + I(sqrt(age)), data = train)
+summary(mlr_sqrt)
+
+press_sqrt = sqrt(sum((resid(mlr_sqrt)/(1-hatvalues(mlr_sqrt)))^2)/n)
+press_sqrt
+
+mse_sqrt = calculate_mse_test(mlr_sqrt, test)
+mse_sqrt
+```
+
+
+
+#### Add logarithmic terms and calculate MSE and PRESS score
+```{r}
+mlr_log <- lm(concrete_strength ~ cement + blast_furnace_slag + 
+                fly_ash + water + superplasticizer + coarse_agg + 
+                fine_agg + age + I(cement^2) + I(blast_furnace_slag^2) + 
+                I(fly_ash^2) + I(water^2) + I(superplasticizer^2) + 
+                I(coarse_agg^2) + 
+                I(fine_agg^2) + I(age^2) + I(cement^3) + 
+                I(blast_furnace_slag^3) + 
+                I(fly_ash^3) + I(water^3) + I(superplasticizer^3) + 
+                I(coarse_agg^3) + 
+                I(fine_agg^3) + I(age^3) + I(sqrt(cement)) + 
+                I(sqrt(blast_furnace_slag)) + 
+                I(sqrt(fly_ash)) + I(sqrt(water)) + 
+                I(sqrt(superplasticizer))+ I(sqrt(coarse_agg)) + 
+                I(sqrt(fine_agg)) + I(sqrt(age)) + I(log(cement+1)) + 
+                I(log(blast_furnace_slag+1)) + 
+                I(log(fly_ash+1)) + I(log(water+1)) + 
+                I(log(superplasticizer+1)) + I(log(coarse_agg + 1)) + 
+                I(log(fine_agg+1)) + I(log(age + 1)) , data = train)
+summary(mlr_log)
+
+press_log = sqrt(sum((resid(mlr_log)/(1-hatvalues(mlr_log)))^2)/n)
+press_log
+
+mse_log = calculate_mse_test(mlr_log, test)
+mse_log
+```
+
+
+#### Adding 2nd order interaction terms 
+```{r}
+mlr_int <- lm(concrete_strength ~ cement + blast_furnace_slag + fly_ash + 
+                water + superplasticizer + coarse_agg + fine_agg + age +
+                cement*blast_furnace_slag + cement*fly_ash + cement*water +
+                cement*superplasticizer + cement*coarse_agg 
+                +cement*fine_agg+
+                cement*age + blast_furnace_slag*fly_ash + 
+                blast_furnace_slag*fly_ash+
+                blast_furnace_slag*water + 
+                blast_furnace_slag*superplasticizer + 
+                blast_furnace_slag*coarse_agg + blast_furnace_slag*fine_agg+
+                blast_furnace_slag*age + fly_ash*water + 
+                fly_ash*superplasticizer + 
+                fly_ash*coarse_agg + fly_ash*fine_agg + fly_ash*age + 
+                water*superplasticizer + water*coarse_agg + water*fine_agg+
+                water*age + superplasticizer*coarse_agg + 
+                superplasticizer*fine_agg+
+                superplasticizer*age + coarse_agg*fine_agg + coarse_agg*age+
+                fine_agg*age , data = train)
+summary(mlr_int)
+
+press_int = sqrt(sum((resid(mlr_int)/(1-hatvalues(mlr_int)))^2)/n)
+press_int
+
+mse_int = calculate_mse_test(mlr_int, test)
+mse_int
+```
+
+
+#### Add both polynomial and 2nd order interaction terms
+```{r}
+mlr_allt_int <- lm(concrete_strength ~ cement + blast_furnace_slag + fly_ash
+                  + water + superplasticizer + coarse_agg + fine_agg + age +
+                  cement*blast_furnace_slag + cement*fly_ash + cement*water+
+                  cement*superplasticizer + cement*coarse_agg 
+                  +cement*fine_agg +
+                  cement*age + blast_furnace_slag*fly_ash + 
+                  blast_furnace_slag*fly_ash+
+                  blast_furnace_slag*water + 
+                  blast_furnace_slag*superplasticizer + 
+                  blast_furnace_slag*coarse_agg + 
+                  blast_furnace_slag*fine_agg
+                  +blast_furnace_slag*age + fly_ash*water + 
+                  fly_ash*superplasticizer + 
+                  fly_ash*coarse_agg + fly_ash*fine_agg + fly_ash*age + 
+                  water*superplasticizer + water*coarse_agg + 
+                  water*fine_agg+
+                  water*age + superplasticizer*coarse_agg + 
+                  superplasticizer*fine_agg+
+                  superplasticizer*age + coarse_agg*fine_agg + 
+                  coarse_agg*age
+                  +fine_agg*age + I(cement^2) + I(blast_furnace_slag^2) + 
+                  I(fly_ash^2) + I(water^2) + I(superplasticizer^2) + 
+                  I(coarse_agg^2) + I(fine_agg^2) + I(age^2) + I(cement^3) +
+                  I(blast_furnace_slag^3) + I(fly_ash^3) + I(water^3) + 
+                  I(superplasticizer^3) + I(coarse_agg^3) + I(fine_agg^3) + 
+                  I(age^3) + I(sqrt(cement)) + I(sqrt(blast_furnace_slag)) +
+                  I(sqrt(fly_ash)) + I(sqrt(water)) + 
+                  I(sqrt(superplasticizer)) + I(sqrt(coarse_agg)) + 
+                  I(sqrt(fine_agg)) + I(sqrt(age)) + I(log(cement+1)) + 
+                  I(log(blast_furnace_slag+1)) + 
+                  I(log(fly_ash+1)) + I(log(water+1)) + 
+                  I(log(superplasticizer+1)) + I(log(coarse_agg)) + 
+                  I(log(fine_agg+1)) + I(log(age)), data = train)
+
+summary(mlr_allt_int)
+
+press_allt_int = sqrt(sum((resid(mlr_allt_int)/(1-hatvalues(mlr_allt_int)))^2)/n)
+press_allt_int
+
+mse_all = calculate_mse_test(mlr_allt_int, test)
+mse_all
+```
+
+
+
+#### Plotting model metrics
+```{r}
+tab <- matrix(c('M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7',
+                'Baseline', 'Baseline+Squared', 'Baseline+Squared+Cubic', 
+                'Baseline+Squared+Cubic+SquareRoot', 
+                'Baseline+Squared+Cubic+SquareRoot+Log' , 
+                'Baseline+Interaction', 
+                'Baseline+Squared+Cubic+SquareRoot+Log+Interaction',
+                mlr$rank-1, mlr_squared$rank-1, mlr_cubed$rank-1, 
+                mlr_sqrt$rank-1, mlr_log$rank-1,
+                mlr_int$rank-1, mlr_allt_int$rank-1, 
+                summary(mlr)$r.squared, summary(mlr_squared)$r.squared, 
+                summary(mlr_cubed)$r.squared, summary(mlr_sqrt)$r.squared, 
+                summary(mlr_log)$r.squared,
+                summary(mlr_int)$r.squared, summary(mlr_allt_int)$r.squared,
+                summary(mlr)$adj.r.squared, 
+                summary(mlr_squared)$adj.r.squared, 
+                summary(mlr_cubed)$adj.r.squared, 
+                summary(mlr_sqrt)$adj.r.squared, 
+                summary(mlr_log)$adj.r.squared,
+                summary(mlr_int)$adj.r.squared, 
+                summary(mlr_allt_int)$adj.r.squared,
+                mse_mlr, mse_sq, mse_cub, mse_sqrt, mse_log, mse_int, 
+                mse_all,
+                press_mlr, press_sq, press_cub, press_sqrt, press_log, 
+                press_int, press_allt_int
+                ), ncol=7)
+colnames(tab) <- c('Model_Name', 'Model_Description','No_of_predictors','R2',                 'Adj_R2', 'MSE', 'PRESS')
+tab <- as.table(tab)
+
+metrics_df = as.data.frame.matrix(tab) 
+
+metrics_df$R2 = as.numeric(as.character(metrics_df$R2))
+metrics_df$Adj_R2 = as.numeric(as.character(metrics_df$Adj_R2))
+metrics_df$MSE = as.numeric(as.character(metrics_df$MSE))
+metrics_df$PRESS = as.numeric(as.character(metrics_df$PRESS))
+
+metrics_df = metrics_df %>% mutate(across(is.numeric, round, digits=2))
+
+
+ggplot(metrics_df, aes(x=Model_Name, y=as.numeric(R2))) + geom_line(aes(group=1)) + geom_point()
+
+ggplot(metrics_df, aes(x=Model_Name, y=as.numeric(Adj_R2))) + geom_line(aes(group=1)) + geom_point()
+
+ggplot(metrics_df, aes(x=Model_Name, y=as.numeric(MSE))) + geom_line(aes(group=1)) + geom_point()
+
+ggplot(metrics_df, aes(x=Model_Name, y=as.numeric(PRESS))) + geom_line(aes(group=1)) + geom_point()
+
+```
+
+
+
+
+### Variable Reduction 
+
+We will now attempt to reduce the number of variables (model complexity) by penalizing predictors in the full model(both polynomial and interaction) in order to reduce overfitting.
+
+#### Backward AIC Regression
+```{r}
+fit_back_aic = step(mlr_allt_int, direction = "backward", trace = 0)
+summary(fit_back_aic)
+
+press_fit_back_aic = sqrt(sum((resid(fit_back_aic)/(1-hatvalues(fit_back_aic)))^2)/n)
+press_fit_back_aic
+
+mse_fbaic = calculate_mse_test(fit_back_aic, test)
+mse_fbaic
+```
+
+
+#### Backward BIC Regression
+```{r}
+n = nrow(train)
+fit_back_bic = step(mlr_allt_int, direction = "backward", k=log(n), trace = 0)
+summary(fit_back_bic)
+
+press_fit_back_bic = sqrt(sum((resid(fit_back_bic)/(1-hatvalues(fit_back_bic)))^2)/n)
+press_fit_back_bic
+
+mse_fbbic = calculate_mse_test(fit_back_bic, test)
+mse_fbbic
+```
+
+
+#### Forward AIC Regression
+```{r}
+
+fit_null = lm(concrete_strength~1,data=train)
+fit_forw_aic = step(fit_null, 
+                  scope = concrete_strength ~ cement + blast_furnace_slag +
+                  fly_ash 
+                  + water + superplasticizer + coarse_agg + fine_agg + age +
+                  cement*blast_furnace_slag + cement*fly_ash + cement*water 
+                  +
+                  cement*superplasticizer + cement*coarse_agg 
+                  +cement*fine_agg +
+                  cement*age + blast_furnace_slag*fly_ash + 
+                  blast_furnace_slag*fly_ash+
+                  blast_furnace_slag*water + 
+                  blast_furnace_slag*superplasticizer + 
+                  blast_furnace_slag*coarse_agg + 
+                  blast_furnace_slag*fine_agg
+                  +blast_furnace_slag*age + fly_ash*water + 
+                  fly_ash*superplasticizer + 
+                  fly_ash*coarse_agg + fly_ash*fine_agg + fly_ash*age + 
+                  water*superplasticizer + water*coarse_agg + 
+                  water*fine_agg+
+                  water*age + superplasticizer*coarse_agg + 
+                  superplasticizer*fine_agg+
+                  superplasticizer*age + coarse_agg*fine_agg + 
+                  coarse_agg*age
+                  +fine_agg*age + I(cement^2) + I(blast_furnace_slag^2) + 
+                  I(fly_ash^2) + I(water^2) + I(superplasticizer^2) + 
+                  I(coarse_agg^2) + I(fine_agg^2) + I(age^2) + I(cement^3) + 
+                  I(blast_furnace_slag^3) + I(fly_ash^3) + I(water^3) + 
+                  I(superplasticizer^3) + I(coarse_agg^3) + I(fine_agg^3) + 
+                  I(age^3) + I(sqrt(cement)) + I(sqrt(blast_furnace_slag)) + 
+                  I(sqrt(fly_ash)) + I(sqrt(water)) + 
+                  I(sqrt(superplasticizer)) + I(sqrt(coarse_agg)) + 
+                  I(sqrt(fine_agg)) + I(sqrt(age)) + I(log(cement+1)) + 
+                  I(log(blast_furnace_slag+1)) + 
+                  I(log(fly_ash+1)) + I(log(water+1)) + 
+                  I(log(superplasticizer+1)) + I(log(coarse_agg)) + 
+                  I(log(fine_agg+1)) + I(log(age)),   
+                  direction = "forward", trace = 0)
+
+summary(fit_forw_aic)
+
+press_fit_forw_aic = sqrt(sum((resid(fit_forw_aic)/(1-hatvalues(fit_forw_aic)))^2)/n)
+press_fit_forw_aic
+
+mse_ffaic = calculate_mse_test(fit_forw_aic, test)
+mse_ffaic
+```
+
+
+#### Forward BIC Regression
+```{r}
+fit_null = lm(concrete_strength~1,data=train)
+fit_forw_bic = step(fit_null, 
+                  scope = concrete_strength ~ cement + blast_furnace_slag +
+                  fly_ash 
+                  + water + superplasticizer + coarse_agg + fine_agg + age +
+                  cement*blast_furnace_slag + cement*fly_ash + cement*water +
+                  cement*superplasticizer + cement*coarse_agg 
+                  +cement*fine_agg +
+                  cement*age + blast_furnace_slag*fly_ash + 
+                  blast_furnace_slag*fly_ash+
+                  blast_furnace_slag*water + 
+                  blast_furnace_slag*superplasticizer + 
+                  blast_furnace_slag*coarse_agg + blast_furnace_slag*fine_agg
+                  +blast_furnace_slag*age + fly_ash*water + 
+                  fly_ash*superplasticizer + 
+                  fly_ash*coarse_agg + fly_ash*fine_agg + fly_ash*age + 
+                  water*superplasticizer + water*coarse_agg + water*fine_agg+
+                  water*age + superplasticizer*coarse_agg + 
+                  superplasticizer*fine_agg+
+                  superplasticizer*age + coarse_agg*fine_agg + coarse_agg*age
+                  +fine_agg*age + I(cement^2) + I(blast_furnace_slag^2) + 
+                  I(fly_ash^2) + I(water^2) + I(superplasticizer^2) + 
+                  I(coarse_agg^2) + I(fine_agg^2) + I(age^2) + I(cement^3) + 
+                  I(blast_furnace_slag^3) + I(fly_ash^3) + I(water^3) + 
+                  I(superplasticizer^3) + I(coarse_agg^3) + I(fine_agg^3) + 
+                  I(age^3) + I(sqrt(cement)) + I(sqrt(blast_furnace_slag)) + 
+                  I(sqrt(fly_ash)) + I(sqrt(water)) + 
+                  I(sqrt(superplasticizer)) + I(sqrt(coarse_agg)) + 
+                  I(sqrt(fine_agg)) + I(sqrt(age)) + I(log(cement+1)) + 
+                  I(log(blast_furnace_slag+1)) + 
+                  I(log(fly_ash+1)) + I(log(water+1)) + 
+                  I(log(superplasticizer+1)) + I(log(coarse_agg)) + 
+                  I(log(fine_agg+1)) + I(log(age)),   
+                  direction = "forward", k = log(n), trace = 0)
+
+summary(fit_forw_bic)
+
+press_fit_forw_bic = sqrt(sum((resid(fit_forw_bic)/(1-hatvalues(fit_forw_bic)))^2)/n)
+press_fit_forw_bic
+
+mse_ffbic = calculate_mse_test(fit_forw_bic, test)
+mse_ffbic
+```
+
+
+
+```{r}
+fit_null = lm(concrete_strength~1,data=train)
+fit_step_aic = step(fit_null, 
+                  scope = concrete_strength ~ cement + blast_furnace_slag +
+                  fly_ash 
+                  + water + superplasticizer + coarse_agg + fine_agg + age +
+                  cement*blast_furnace_slag + cement*fly_ash + cement*water +
+                  cement*superplasticizer + cement*coarse_agg 
+                  +cement*fine_agg +
+                  cement*age + blast_furnace_slag*fly_ash + 
+                  blast_furnace_slag*fly_ash+
+                  blast_furnace_slag*water + 
+                  blast_furnace_slag*superplasticizer + 
+                  blast_furnace_slag*coarse_agg + blast_furnace_slag*fine_agg
+                  +blast_furnace_slag*age + fly_ash*water + 
+                  fly_ash*superplasticizer + 
+                  fly_ash*coarse_agg + fly_ash*fine_agg + fly_ash*age + 
+                  water*superplasticizer + water*coarse_agg + water*fine_agg+
+                  water*age + superplasticizer*coarse_agg + 
+                  superplasticizer*fine_agg+
+                  superplasticizer*age + coarse_agg*fine_agg + coarse_agg*age
+                  +fine_agg*age + I(cement^2) + I(blast_furnace_slag^2) + 
+                  I(fly_ash^2) + I(water^2) + I(superplasticizer^2) + 
+                  I(coarse_agg^2) + I(fine_agg^2) + I(age^2) + I(cement^3) + 
+                  I(blast_furnace_slag^3) + I(fly_ash^3) + I(water^3) + 
+                  I(superplasticizer^3) + I(coarse_agg^3) + I(fine_agg^3) + 
+                  I(age^3) + I(sqrt(cement)) + I(sqrt(blast_furnace_slag)) + 
+                  I(sqrt(fly_ash)) + I(sqrt(water)) + 
+                  I(sqrt(superplasticizer)) + I(sqrt(coarse_agg)) + 
+                  I(sqrt(fine_agg)) + I(sqrt(age)) + I(log(cement+1)) + 
+                  I(log(blast_furnace_slag+1)) + 
+                  I(log(fly_ash+1)) + I(log(water+1)) + 
+                  I(log(superplasticizer+1)) + I(log(coarse_agg)) + 
+                  I(log(fine_agg+1)) + I(log(age)),   
+                  direction = "both", trace = 0)
+
+summary(fit_step_aic)
+
+press_fit_step_aic = sqrt(sum((resid(fit_step_aic)/(1-hatvalues(fit_step_aic)))^2)/n)
+press_fit_step_aic
+
+mse_fsaic = calculate_mse_test(fit_step_aic, test)
+mse_fsaic
+```
+
+
+
+#### 
+```{r}
+fit_null = lm(concrete_strength~1,data=train)
+fit_step_bic = step(fit_null, 
+                  scope = concrete_strength ~ cement + blast_furnace_slag +
+                  fly_ash 
+                  + water + superplasticizer + coarse_agg + fine_agg + age +
+                  cement*blast_furnace_slag + cement*fly_ash + cement*water +
+                  cement*superplasticizer + cement*coarse_agg 
+                  +cement*fine_agg +
+                  cement*age + blast_furnace_slag*fly_ash + 
+                  blast_furnace_slag*fly_ash+
+                  blast_furnace_slag*water + 
+                  blast_furnace_slag*superplasticizer + 
+                  blast_furnace_slag*coarse_agg + blast_furnace_slag*fine_agg
+                  +blast_furnace_slag*age + fly_ash*water + 
+                  fly_ash*superplasticizer + 
+                  fly_ash*coarse_agg + fly_ash*fine_agg + fly_ash*age + 
+                  water*superplasticizer + water*coarse_agg + water*fine_agg+
+                  water*age + superplasticizer*coarse_agg + 
+                  superplasticizer*fine_agg+
+                  superplasticizer*age + coarse_agg*fine_agg + coarse_agg*age
+                  +fine_agg*age + I(cement^2) + I(blast_furnace_slag^2) + 
+                  I(fly_ash^2) + I(water^2) + I(superplasticizer^2) + 
+                  I(coarse_agg^2) + I(fine_agg^2) + I(age^2) + I(cement^3) + 
+                  I(blast_furnace_slag^3) + I(fly_ash^3) + I(water^3) + 
+                  I(superplasticizer^3) + I(coarse_agg^3) + I(fine_agg^3) + 
+                  I(age^3) + I(sqrt(cement)) + I(sqrt(blast_furnace_slag)) + 
+                  I(sqrt(fly_ash)) + I(sqrt(water)) + 
+                  I(sqrt(superplasticizer)) + I(sqrt(coarse_agg)) + 
+                  I(sqrt(fine_agg)) + I(sqrt(age)) + I(log(cement+1)) + 
+                  I(log(blast_furnace_slag+1)) + 
+                  I(log(fly_ash+1)) + I(log(water+1)) + 
+                  I(log(superplasticizer+1)) + I(log(coarse_agg)) + 
+                  I(log(fine_agg+1)) + I(log(age)),   
+                  direction = "both", trace = 0)
+
+summary(fit_step_bic)
+
+press_fit_step_bic = sqrt(sum((resid(fit_step_bic)/(1-hatvalues(fit_step_bic)))^2)/n)
+press_fit_step_bic
+
+mse_fsbic = calculate_mse_test(fit_step_bic, test)
+mse_fsbic
+```
+
+
+#### Plotting metrics for models after variable reduction
+```{r}
+tab2 <- matrix(c('M8', 'M9', 'M10', 'M11', 'M12', 'M13',
+                'FitBack_AIC', 'FitBack_BIC', 'FitForward_AIC', 
+                'FitForward_BIC', 
+                'FitStep_AIC' , 'FitStep_BIC',
+                fit_back_aic$rank-1, fit_back_bic$rank-1, 
+                fit_forw_aic$rank-1, fit_forw_bic$rank-1, 
+                fit_step_aic$rank-1,
+                fit_step_bic$rank-1, 
+                summary(fit_back_aic)$r.squared, 
+                summary(fit_back_bic)$r.squared, 
+                summary(fit_forw_aic)$r.squared, 
+                summary(fit_forw_bic)$r.squared, 
+                summary(fit_step_aic)$r.squared,
+                summary(fit_step_bic)$r.squared, 
+                summary(fit_back_aic)$adj.r.squared, 
+                summary(fit_back_bic)$adj.r.squared, 
+                summary(fit_forw_aic)$adj.r.squared, 
+                summary(fit_forw_bic)$adj.r.squared, 
+                summary(fit_step_aic)$adj.r.squared,
+                summary(fit_step_bic)$adj.r.squared,
+                mse_fbaic, mse_fbbic, mse_ffaic, mse_ffbic, mse_fsaic, 
+                mse_fsbic,
+                press_fit_back_aic, press_fit_back_bic, press_fit_forw_aic, 
+                press_fit_forw_bic, press_fit_step_aic, press_fit_step_bic
+                ), ncol=7)
+colnames(tab2) <- c('Model_Name', 'Model_Description','No_of_predictors','R2', 'Adj_R2', 'MSE', 'PRESS')
+tab2 <- as.table(tab2)
+
+metrics_df2 = as.data.frame.matrix(tab2) 
+
+metrics_df2$R2 = as.numeric(as.character(metrics_df2$R2))
+metrics_df2$Adj_R2 = as.numeric(as.character(metrics_df2$Adj_R2))
+metrics_df2$MSE = as.numeric(as.character(metrics_df2$MSE))
+metrics_df2$PRESS = as.numeric(as.character(metrics_df2$PRESS))
+
+metrics_df2 = metrics_df2 %>% mutate(across(is.numeric, round, digits=2))
+
+metrics_df2$Model_Name <- factor(metrics_df2$Model_Name, levels = metrics_df2$Model_Name)
+
+ggplot(metrics_df2, aes(x=Model_Name, y=as.numeric(R2))) + geom_line(aes(group=1)) + geom_point()
+
+ggplot(metrics_df2, aes(x=Model_Name, y=as.numeric(Adj_R2))) + geom_line(aes(group=1)) + geom_point()
+
+ggplot(metrics_df2, aes(x=Model_Name, y=as.numeric(MSE))) + geom_line(aes(group=1)) + geom_point()
+
+ggplot(metrics_df2, aes(x=Model_Name, y=as.numeric(PRESS))) + geom_line(aes(group=1)) + geom_point()
+
+```
+
+
+### K Fold Cross Validation for the selected models
+
+K-Fold cross validation is useful for understanding how well the model generalises on the data.\
+
+For this experiment, we will select some of the most promising models from the previous experiments and compare their performance over 5 fold cross validation.\
+
+Selected Models:\
+1. M1: Baseline Model\
+2. M7: Baseline+Squared+Cubic+SquareRoot+Log+Interaction Model\
+3. M10: Fit Forward AIC\
+4. M9: Fit Backward BIC\
+5. M12: Fit Step AIC\
+6. M13: Fit Step BIC\
+```{r}
+k=8
+
+#m1 baseline M1
+#m2 all M7
+#m3 ff aic M10
+#m4 fb bic M9
+#m5 fs aic M12
+#m6 fs bic M13
+
+RMSE_m1 = RMSE_m2 = RMSE_m3 = RMSE_m4 = RMSE_m5 = RMSE_m6 = numeric(k)
+
+#Create k equally size folds
+folds <- cut(1:n,breaks=k,labels=FALSE)
+
+#Perform a k-fold cross validation
+for(i in 1:k)
+{
+  # Find the indices for test data
+  test_index = which(folds==i)
+  
+  # Obtain training/test data
+  test_data = data[test_index, ]
+  training_data = data[-test_index, ]
+  
+  
+  model_1 = lm(concrete_strength ~ cement + blast_furnace_slag + 
+                 fly_ash + water + superplasticizer + coarse_agg + 
+                 fine_agg + age, data=training_data)
+  
+  model_2 = lm(concrete_strength ~ cement + blast_furnace_slag + fly_ash + 
+                 water + superplasticizer + coarse_agg + fine_agg + age +
+                 cement:blast_furnace_slag + cement:fly_ash + cement:water +
+                 cement:superplasticizer + cement:coarse_agg + 
+                 cement:fine_agg +
+                 cement:age + blast_furnace_slag:fly_ash + 
+                 blast_furnace_slag:fly_ash+
+                 blast_furnace_slag:water + 
+                 blast_furnace_slag:superplasticizer + 
+                 blast_furnace_slag:coarse_agg + blast_furnace_slag:fine_agg 
+                 +blast_furnace_slag:age + fly_ash:water + 
+                 fly_ash:superplasticizer + 
+                 fly_ash:coarse_agg + fly_ash:fine_agg + fly_ash:age + 
+                 water:superplasticizer + water:coarse_agg + water:fine_agg+
+                 water:age + superplasticizer:coarse_agg + 
+                 superplasticizer:fine_agg+
+                 superplasticizer:age + coarse_agg:fine_agg + coarse_agg:age 
+                 +fine_agg:age + I(cement^2) + I(blast_furnace_slag^2) + 
+                 I(fly_ash^2) + I(water^2) + I(superplasticizer^2) + 
+                 I(coarse_agg^2) + 
+                 I(fine_agg^2) + I(age^2) + I(cement^3) + 
+                 I(blast_furnace_slag^3) + 
+                 I(fly_ash^3) + I(water^3) + I(superplasticizer^3) + 
+                 I(coarse_agg^3) + 
+                 I(fine_agg^3) + I(age^3) + I(sqrt(cement)) + 
+                 I(sqrt(blast_furnace_slag)) + 
+                 I(sqrt(fly_ash)) + I(sqrt(water)) + 
+                 I(sqrt(superplasticizer)) + I(sqrt(coarse_agg)) + 
+                 I(sqrt(fine_agg)) + I(sqrt(age)) + I(log(cement+1)) + 
+                 I(log(blast_furnace_slag+1)) + 
+                 I(log(fly_ash+1)) + I(log(water+1)) + 
+                 I(log(superplasticizer+1)) + I(log(coarse_agg)) + 
+                 I(log(fine_agg+1)) + I(log(age)), data=training_data)
+  
+  model_3 = lm(concrete_strength~ I(log(age))+ cement+ I(log(superplasticizer                  + 1))+ blast_furnace_slag+ water+ superplasticizer+ 
+                 I(log(fly_ash + 1))+ I(age^2)+ I(log(cement + 1))+ 
+                 I(superplasticizer^2)+ 
+                 I(superplasticizer^3)+ I(cement^3)+ I(sqrt(cement))+ 
+                 I(blast_furnace_slag^3)+ 
+                 fly_ash+ I(log(fine_agg + 1))+ I(sqrt(fine_agg))+ 
+                 I(log(coarse_agg))+ 
+                 I(age^3)+ I(water^3)+ I(log(water + 1))+ I(sqrt(water))+ 
+                 fine_agg+ I(sqrt(age))+ I(cement^2)+ I(sqrt(fly_ash))+ 
+                 I(fly_ash^2)+ 
+                 I(log(blast_furnace_slag + 1))+ I(sqrt(blast_furnace_slag))+
+                 I(blast_furnace_slag^2)+ I(fine_agg^2)+ I(fine_agg^3)+ 
+                 I(sqrt(coarse_agg))+ 
+                 I(fly_ash^3) + water:superplasticizer + 
+                 blast_furnace_slag:superplasticizer + 
+                 cement:water + blast_furnace_slag:fly_ash + water:fly_ash + 
+                 cement:fine_agg +
+                 cement:blast_furnace_slag, data=training_data)
+  
+  model_4 = lm(concrete_strength~ cement+ blast_furnace_slag+ fly_ash+ 
+               water+ superplasticizer+ coarse_agg+ fine_agg+ age+ 
+               I(blast_furnace_slag^2)+ 
+               I(fly_ash^2)+ I(fine_agg^2)+ I(cement^3)+ 
+               I(blast_furnace_slag^3)+ 
+               I(fine_agg^3)+ I(sqrt(cement))+ I(sqrt(blast_furnace_slag))+ 
+               I(sqrt(fly_ash))+ I(sqrt(water))+ I(sqrt(fine_agg))+ 
+               I(log(cement + 1))+ I(log(blast_furnace_slag + 1))+ 
+               I(log(fly_ash + 1))+ I(log(superplasticizer + 1))+ I(log(age))                +cement:water + cement:fine_agg + blast_furnace_slag:water + 
+               blast_furnace_slag:superplasticizer + blast_furnace_slag:age +                fly_ash:water + fly_ash:superplasticizer + fly_ash:age + 
+               water:superplasticizer + water:coarse_agg + water:fine_agg,                  data=training_data)
+  
+  model_5 = lm(concrete_strength~ I(log(age))+ cement+ blast_furnace_slag+ 
+               water+ superplasticizer+ I(age^2)+ I(superplasticizer^2)+ 
+               I(superplasticizer^3)+ I(cement^3)+ I(sqrt(cement))+ 
+               I(blast_furnace_slag^3)+ 
+               fly_ash+ I(log(fine_agg + 1))+ I(sqrt(fine_agg))+ 
+               I(log(coarse_agg))+ 
+               I(age^3)+ I(water^3)+ I(log(water + 1))+ I(sqrt(water))+ 
+               fine_agg+ I(sqrt(age))+ I(cement^2) + water:superplasticizer +
+               blast_furnace_slag:superplasticizer + cement:water + 
+               water:fly_ash +
+               cement:fine_agg + water:fine_agg, data=training_data)
+  
+  model_6 = lm(concrete_strength~ I(log(age))+ cement+ blast_furnace_slag+ 
+               water+ superplasticizer+ I(log(fly_ash + 1))+ I(age^2)+ 
+               I(log(cement + 1))+ I(superplasticizer^2)+ 
+               I(superplasticizer^3) + 
+               water:superplasticizer + blast_furnace_slag:superplasticizer +
+               cement:water, data=training_data)
+  
+  # Obtain RMSE on the 'test' data
+  resid_m1 = test_data["concrete_strength"] - predict(model_1, newdata=test_data)              
+  RMSE_m1[i] = sqrt(sum(resid_m1^2)/nrow(test_data)) 
+  
+  resid_m2 = test_data[,"concrete_strength"] - predict(model_2, newdata=test_data) 
+  RMSE_m2[i] = sqrt(sum(resid_m2^2)/nrow(test_data))
+  
+  resid_m3 = test_data[,"concrete_strength"] - predict(model_3, newdata=test_data) 
+  RMSE_m3[i] = sqrt(sum(resid_m3^2)/nrow(test_data))
+  
+  resid_m4 = test_data[,"concrete_strength"] - predict(model_4, newdata=test_data) 
+  RMSE_m4[i] = sqrt(sum(resid_m4^2)/nrow(test_data))
+  
+  resid_m5 = test_data[,"concrete_strength"] - predict(model_5, newdata=test_data) 
+  RMSE_m5[i] = sqrt(sum(resid_m5^2)/nrow(test_data))
+  
+  resid_m6 = test_data[,"concrete_strength"] - predict(model_6, newdata=test_data) 
+  RMSE_m6[i] = sqrt(sum(resid_m6^2)/nrow(test_data))
+}
+
+
+cat("Baseline model: ", mean(RMSE_m1))
+cat("Complete  model with both all interaction and polynomial terms: ", mean(RMSE_m2))
+cat("Fit Forward AIC model: ",mean(RMSE_m3))
+cat("Fit Backward BIC model: ",mean(RMSE_m4))
+cat("Fit Stepwise AIC model: ",mean(RMSE_m5))
+cat("Fit Stepwise BIC model: ",mean(RMSE_m6))
+
+```
+
+From all these experiments, we can conclude that the model we obtain after applying Stepwise AIC on the complete model(polynomial + interaction) is the best model for predicting the strength of concrete.
+
+
+## Model Interpretability
+
+### Variable Importance
+
+#### Using Standardized Model Coefficients
+```{r}
+data_std = as.data.frame(scale(data, center=TRUE, scale=TRUE))
+
+mlr_std <- lm(concrete_strength~.,data=data_std)
+summary(mlr_std)
+
+sort(abs(mlr_std$coefficients), decreasing =TRUE)
+```
+
+Top influential features : cement, blast_furnace, age, fly_ash
+
+
+#### Random Forest Variable Importance
+```{r}
+
+rf <- randomForest(concrete_strength~., data=data, proximity=TRUE)
+summary(rf)
+importance(rf)
+varImpPlot(rf)
+```
+
+Top influential features : age, cement, water, superplasticizer
+
+#### R2 from Single Predictor Model
+```{r}
+calculate_r2 <- function(var_name, data) {
+  print(var_name)
+  fm <- as.formula(paste("concrete_strength", "~", var_name))
+  model = lm(fm, data = data)
+  r2 = summary(model)$r.squared
+  return(r2)
+}
+
+
+for(el in names(data)) {
+  if (el != "concrete_strength")
+  {
+  r2 = calculate_r2(el, data)
+  cat("R2 is:  ", r2, "\n")
+  }
+}
+```
+
+Top influential features : cement, superplasticizer, age, water
+
+Based on all these experiments, we can conclude that the following are highly likely to be features of significant importance to the model:
+
+1. Cement
+2. Superplasticizer
+3. Water
+4. Age
+
+
+### Final Balanced Model
+
+We choose the Model we got by using Stepwise BIC as a balanced model. It has 13 predictors as well as considerably high performance metrics.
+```{r}
+best_model = lm(concrete_strength~ I(log(age))+ cement+ blast_furnace_slag+ 
+               water+ superplasticizer+ I(log(fly_ash + 1))+ I(age^2)+ 
+               I(log(cement + 1))+ I(superplasticizer^2)+ 
+               I(superplasticizer^3) + 
+               water:superplasticizer + blast_furnace_slag:superplasticizer +
+               cement:water, data=train)
+summary(best_model)
+
+vif(best_model)
+```
+
+Dropping interaction and polynomial terms with high VIF\
+\
+Features Dropped:\
+- cement:water\
+- blast_furnace_slag:superplasticizer\
+- water:superplasticizer\
+- superplasticizer^2\
+- log(cement)\
+
+```{r}
+best_model = lm(concrete_strength~ I(log(age))+ cement+ blast_furnace_slag+ 
+               water+ superplasticizer+ I(log(fly_ash + 1))+ I(age^2)+ 
+               I(superplasticizer^3), data=train)
+summary(best_model)
+
+vif(best_model)
+
+press_best = sqrt(sum((resid(best_model)/(1-hatvalues(best_model)))^2)/n)
+press_best
+
+mse_best = calculate_mse_test(best_model, test)
+mse_best
+```
+This model gives us a good balance of predictability as well as interpretability.
+
+
+### Checking Model Assumptions for the Final Selected model
+```{r}
+check_model_assumptions(best_model)
+```
+The normality assumption holds true, as the p-value for the Shapiro Wilks test is greater than the significance level (0.05).
+
+The equal variance assumption fails as the p value for the BP test is still less than 0.05.
+
+The linearity assumption seems to get violated as the data points are not equally distributed on either side of the axis. 
+
+
+
+### Significance of Regression (Testing Hypothesis)
+
+#### Verifing initial assumptions
+
+We can use the final model to verify whether some of the initial hypothesis we formulated hold true.
+
+1. Water is a significant predictor for the model
+2. Cement is a significant variable for predicting concrete strength.
+3. Fine aggregate and coarse aggregate do not contribute significantly   towards the prediction of concrete strength.
+```{r}
+summary(best_model)
+
+summary(baseline)
+
+```
+
+By looking at the model summary for both the best model and the baseline model, we can conclude that:
+
+1. Water is an important predictor. [p-value < 0.05]
+2. Cement is an important predictor. [p-value < 0.05]
+3. Fine aggregate and coarse aggregate are not significant predictors. [p-value > 0.05 and not in best model]
+
+
+  
+
+
+
